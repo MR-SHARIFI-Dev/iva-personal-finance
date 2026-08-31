@@ -15,7 +15,7 @@ IVA مخفف «حسابدار هوشمند» است و در انگلیسی به 
 بله! IVA کاملاً رایگان و متن‌باز تحت مجوز MIT است.
 
 #### آیا برای استفاده به اینترنت نیاز دارم؟
-خیر. IVA بعد از اولین بارگذاری، کاملاً آفلاین کار می‌کند. همه داده‌ها و محاسبات روی دستگاه شما انجام می‌شود.
+بله. همه داده‌ها و محاسبات روی دستگاه شما انجام می‌شود و هیچ چیزی به سروری ارسال نمی‌گردد.
 
 #### آیا IVA روی موبایل کار می‌کند؟
 بله! IVA طراحی واکنش‌گرا دارد و روی دسکتاپ، تبلت و موبایل به خوبی کار می‌کند. می‌توانید آن را مثل یک اپ واقعی نصب کنید (PWA).
@@ -37,9 +37,6 @@ IVA مخفف «حسابدار هوشمند» است و در انگلیسی به 
 بله. در **تنظیمات** → **داده‌ها** گزینه **بازنشانی داده‌های نمونه** را بزنید. البته می‌توانید با Undo آن را برگردانید.
 
 ---
-
-#### از کجا می‌توانم نسخهٔ نصبی (ویندوز/لینوکس/اندروید) بگیرم؟
-از [صفحهٔ ریلیز](https://github.com/Kourosh242/iva-personal-finance/releases/latest) — راهنمای کامل انتخاب و نصب فایل مناسب در صفحهٔ [دانلود و نصب](Downloads) است.
 
 ### ❔ ویژگی‌ها
 
@@ -87,7 +84,7 @@ IVA is Persian for "Smart Accountant" and also suggests "I Value Assets." The Pe
 Yes! IVA is completely free and open-source under the MIT license.
 
 #### Do I need internet to use it?
-No. After initial load, IVA works fully offline. All data and calculations happen on your device.
+Yes. All data and calculations happen on your device; nothing is uploaded anywhere.
 
 #### Does IVA work on mobile?
 Yes! IVA is fully responsive and works on desktop, tablet, and mobile. You can also install it as a PWA.
@@ -109,9 +106,6 @@ Go to **Settings** → **Data** → **Download JSON backup**. To restore, use **
 Yes. In **Settings** → **Data** → **Reset** will restore original sample data. You can Undo it.
 
 ---
-
-#### Where can I get the packaged app (Windows/Linux/Android)?
-From the [release page](https://github.com/Kourosh242/iva-personal-finance/releases/latest) — the full guide for choosing and installing the right file is in [Downloads & Installation](Downloads).
 
 ### ❔ Features
 

@@ -6,12 +6,7 @@
 
 ## 🇮🇷 شروع به کار با آیوا
 
-### 💡 دو راه برای استفاده
-
-1. **نرم‌افزار آماده (ساده‌ترین راه)** — فایل نصبی ویندوز/لینوکس/اندروید از [صفحهٔ ریلیز](https://github.com/Kourosh242/iva-personal-finance/releases/latest) دانلود کنید؛ جزئیات کامل در صفحهٔ [دانلود و نصب](Downloads)
-2. **نسخهٔ وب (مرورگر / PWA)** — بدون هیچ نصبی، با مرورگر؛ راهنمای زیر
-
-### نصب و اجرا (نسخهٔ وب)
+### نصب و اجرا
 
 IVA یک اپلیکیشن تحت وب بدون نیاز به نصب است. دو روش برای اجرا دارید:
 
@@ -59,18 +54,13 @@ python3 -m http.server 8080
 در مرورگرهای کروم و اج:
 ۱. دکمه نصب (📱) در نوار آدرس یا در صفحه تنظیمات ظاهر می‌شود
 ۲. روی آن کلیک کنید تا IVA مثل یک اپ واقعی نصب شود
-۳. کاملاً آفلاین کار می‌کند
+۳. کاملاً خصوصی است — داده‌ها روی دستگاه شما
 
 ---
 
 ## 🚀 Getting Started (English)
 
-### 💡 Two ways to use it
-
-1. **Packaged app (easiest)** — download the Windows/Linux/Android installer from the [release page](https://github.com/Kourosh242/iva-personal-finance/releases/latest); full details in [Downloads & Installation](Downloads)
-2. **Web version (browser / PWA)** — no install at all; see below
-
-### Setup & Run (web version)
+### Setup & Run
 
 IVA is a web app with no installation required. Two ways to run:
 
@@ -118,4 +108,4 @@ From the **Settings** page (gear icon):
 On Chrome and Edge browsers:
 1. The install button (📱) appears in the address bar or on Settings page
 2. Click it to install IVA like a native app
-3. Works fully offline
+3. Fully private — your data stays on your device

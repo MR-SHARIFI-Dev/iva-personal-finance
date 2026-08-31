@@ -207,7 +207,7 @@ Application **main controller**:
 - 8 main pages with dynamic rendering
 - Modal forms for CRUD operations
 - Event delegation for click, keyboard, and form events
-- Snapshot-based Undo
+- Snapshot-based Undo/Redo
 
 ### 🤝 Contributing
 

@@ -12,7 +12,7 @@
 
 ## 🇮🇷 خوش آمدید به ویکی پلتفرم حسابداری آیوا (IVA)
 
-اینجا مرجع کامل مستندات **پلتفرم حسابداری آیوا | IVA** است — یک پلتفرم حسابداری شخصی دو زبانه، متن‌باز، آفلاین و کاملاً خصوصی.
+اینجا مرجع کامل مستندات **پلتفرم حسابداری آیوا | IVA** است — یک پلتفرم حسابداری شخصی دو زبانه، متن‌باز و کاملاً خصوصی؛ داده‌ها روی دستگاه شما.
 
 ### 📑 صفحات ویکی
 
@@ -20,7 +20,6 @@
 |------|-------|
 | [🏠 صفحه اصلی](Home) | معرفی و فهرست مطالب |
 | [🚀 شروع به کار](Getting-Started) | نصب، اجرا و راه‌اندازی اولیه |
-| [📦 دانلود و نصب](Downloads) | راهنمای انتخاب و نصب فایل‌های آماده (ویندوز/لینوکس/اندروید) |
 | [✨ قابلیت‌ها](Features) | بررسی عمیق تمام قابلیت‌های برنامه |
 | [📖 راهنمای کاربر](User-Guide) | آموزش کامل کار با صفحات و ابزارها |
 | [🛠️ راهنمای توسعه](Development-Guide) | ساختار کد، ماژول‌ها و مشارکت |
@@ -37,7 +36,7 @@
 
 ## 🇬🇧 English
 
-Welcome to the **IVA Personal Finance Platform** Wiki — a bilingual, open-source, offline-first personal finance platform.
+Welcome to the **IVA Personal Finance Platform** Wiki — a bilingual, open-source, privacy-first personal finance platform.
 
 ### 📑 Wiki Pages
 
@@ -45,7 +44,6 @@ Welcome to the **IVA Personal Finance Platform** Wiki — a bilingual, open-sour
 |------|-------------|
 | [🏠 Home](Home) | Introduction and table of contents |
 | [🚀 Getting Started](Getting-Started) | Setup, installation, first launch |
-| [📦 Downloads & Installation](Downloads) | Choosing & installing the packaged apps (Windows/Linux/Android) |
 | [✨ Features](Features) | Deep dive into all app features |
 | [📖 User Guide](User-Guide) | Complete tutorial for all pages and tools |
 | [🛠️ Development Guide](Development-Guide) | Code structure, modules, contribution |

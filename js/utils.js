@@ -21,17 +21,15 @@ const U = {
     return Number.isFinite(n) ? n : NaN;
   },
   group(n) {
-    const num = Number(n);
-    if (!Number.isFinite(num)) return String(n ?? "");
-    const fa = U.lang() === "fa";
-    if (Math.abs(num) >= 1e16) return (num < 0 ? (fa ? "−" : "-") : "") + String(Math.abs(num));
-    const neg = num < 0;
-    const [intStr, decStr] = String(Math.abs(num)).split(".");
-    let s = intStr, out = "";
+    const neg = n < 0; const abs = Math.abs(Math.round(n));
+    let s = String(abs), out = "";
     while (s.length > 3) { out = "," + s.slice(-3) + out; s = s.slice(0, -3); }
-    let grouped = s + out + (decStr && +decStr ? (fa ? "٫" : ".") + decStr : "");
-    if (fa) grouped = grouped.replace(/\d/g, d => U.faDigits[+d]).replace(/,/g, "٬");
-    return (neg ? (fa ? "−" : "-") : "") + grouped;
+    const grouped = s + out;
+    if (U.lang() === "fa") {
+      const fa = grouped.replace(/\d/g, d => U.faDigits[+d]).replace(/,/g, "٬");
+      return (neg ? "−" : "") + fa;
+    }
+    return (neg ? "-" : "") + grouped;
   },
   /* full money in display currency; amounts stored in toman */
   money(n, opts = {}) {
@@ -54,7 +52,11 @@ const U = {
   },
   pct(n) {
     const r = Math.round(n * 10) / 10;
-    return U.lang() === "fa" ? U.group(r) + "٪" : r + "%";
+    if (U.lang() !== "fa") return r + "%";
+    /* فیکس: U.group اعشار را گرد می‌کرد و «۴۵٫۶٪» در فارسی «۴۶٪» می‌شد */
+    const neg = r < 0, a = Math.abs(r);
+    const ip = Math.floor(a), fr = Math.round((a - ip) * 10) % 10;
+    return (neg ? "\u2212" : "") + U.group(ip) + (fr ? "\u066B" + U.faDigits[fr] : "") + "٪";
   },
 
   /* ---------- i18n plumbing (set by app) ---------- */
@@ -115,7 +117,8 @@ const U = {
     const nowP = U._jParts(new Date());
     const day = U.lang() === "fa" ? U.group(p.day) : String(p.day);
     const ym = U.jalaliMonths[U.lang()][p.month - 1];
-    const y = p.year !== nowP.year ? " " + (U.lang() === "fa" ? U.group(p.year) : p.year) : "";
+    /* فیکس: U.group سال را «۱٬۴۰۳» می‌کرد — سال بدون جداکنندهٔ هزارگان */
+    const y = p.year !== nowP.year ? " " + (U.lang() === "fa" ? String(p.year).replace(/\d/g, x => U.faDigits[+x]) : p.year) : "";
     return day + " " + ym + y;
   },
   dueLabel(iso) {
@@ -176,6 +179,8 @@ const U = {
     smartphone: '<rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>',
     spark: '<path d="M12 2l1.9 6.1L20 10l-6.1 1.9L12 18l-1.9-6.1L4 10l6.1-1.9z"/>',
     flag: '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/>',
+    refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+    tool: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
     chevL: '<polyline points="15 18 9 12 15 6"/>',
     chevR: '<polyline points="9 18 15 12 9 6"/>'
   },
@@ -186,3 +191,4 @@ const U = {
 };
 
 window.IVA.utils = U;
+window.IVA.VERSION = "2.0.0"; /* نسخهٔ اپ — هنگام انتشار به‌روز شود */

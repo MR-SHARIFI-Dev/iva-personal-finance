@@ -16,11 +16,14 @@
     txFilters: { q: "", type: "all", cat: "all", acc: "all", month: "all", sort: "dateDesc" },
     txLimit: 30,
     reportRange: 6,
+    repSec: "cashflow", /* بند ۸: نشست مالی ۴ سکشنی — فقط سکشن انتخابی رندر می‌شود */
+    repAcc: "all",      /* فیلتر حساب/کارت انتخابی در همه سکشن‌های گزارش */
     deferredInstall: null,
     lastFocus: null,
     undoSnap: null
   };
   window.IVA.app = App;
+  window.IVA.toast = toast; /* برای ماژول tools */
 
   /* ============ 1. derived analytics ============ */
   const D = {
@@ -60,22 +63,35 @@
       };
     },
     health() {
+      /* نمره فقط از بخش‌هایی محاسبه می‌شود که داده واقعی دارند.
+         باگ قدیمی: با داده خالی، پیش‌فرض‌های خوش‌بینانه (۰.۵ پس‌انداز + ۱۰۰ بودجه + ۱۰۰ بدهی)
+         نمره ۸۰ «عالی» می‌ساخت! حالا با هیچ داده‌ای، حالت «بدون داده» برمی‌گردد. */
       const cur = D.sums(D.txOfMonth(D.curKey()));
-      const savingsRate = cur.income > 0 ? U.clamp((cur.income - cur.expense) / cur.income, 0, 1) : 0.5;
+      const hasCur = cur.income > 0 || cur.expense > 0;
       const buds = Store.state.budgets;
-      let budScore = 100;
+      const { debt } = D.totalsDebt();
+      let sum = 0, weight = 0;
+      if (hasCur) {
+        const sr = cur.income > 0 ? U.clamp((cur.income - cur.expense) / cur.income, 0, 1) : 0;
+        sum += sr * 40; weight += 40;
+      }
       if (buds.length) {
-        budScore = buds.reduce((acc, b) => {
+        const budScore = buds.reduce((acc, b) => {
           const ratio = b.amount > 0 ? D.budgetSpent(b) / b.amount : 0;
           return acc + U.clamp(100 - Math.max(0, ratio - 0.85) / 0.15 * 100, 0, 100);
         }, 0) / buds.length;
+        sum += budScore * 0.3; weight += 30;
       }
-      const { debt } = D.totalsDebt();
-      const net = Math.max(D.netWorth(), 1);
-      const debtScore = debt > 0 ? U.clamp(100 - (debt / net) * 300, 0, 100) : 100;
-      const score = Math.round(savingsRate * 40 + budScore * 0.3 + debtScore * 0.3);
+      if (debt > 0 || hasCur) {
+        const net = Math.max(D.netWorth(), 1);
+        sum += (debt > 0 ? U.clamp(100 - (debt / net) * 300, 0, 100) : 100) * 0.3;
+        weight += 30;
+      }
+      if (weight === 0) return { score: 0, label: "health.noData", neutral: true, savingsRate: null };
+      const score = U.clamp(Math.round(sum / weight * 100), 0, 100);
       const label = score >= 80 ? "health.great" : score >= 60 ? "health.good" : score >= 40 ? "health.ok" : "health.poor";
-      return { score: U.clamp(score, 0, 100), label, savingsRate: Math.round(savingsRate * 100) };
+      const srPct = cur.income > 0 ? Math.round(U.clamp((cur.income - cur.expense) / cur.income, 0, 1) * 100) : 0;
+      return { score, label, savingsRate: srPct };
     },
     insights() {
       const out = [];
@@ -124,7 +140,7 @@
   window.IVA.data = D;
 
   /* ============ 2. router ============ */
-  const PAGES = ["overview", "transactions", "accounts", "budgets", "goals", "debts", "reports", "settings"];
+  const PAGES = ["overview", "transactions", "accounts", "budgets", "goals", "debts", "reports", "tools", "settings"];
 
   function parseHash() {
     const h = location.hash.replace(/^#\/?/, "");
@@ -154,15 +170,17 @@
       goals: [U.t("goal.title"), U.t("goal.sub")],
       debts: [U.t("debt.title"), U.t("debt.sub")],
       reports: [U.t("rep.title"), U.t("rep.sub")],
+      tools: [U.t("tools.title"), U.t("tools.sub")],
       settings: [U.t("set.title"), U.t("set.sub")]
     }[page];
-    if (page === "overview") t[0] = U.lang() === "fa" ? "سلام " + (App.settings.name || "") + "، خوش آمدی 👋" : "Hello " + (App.settings.name || "") + ", welcome 👋";
+    if (page === "overview") t[0] = U.t("common.today") === "امروز" ? "سلام " + (App.settings.name || "") + "، خوش آمدی 👋" : "Hello " + (App.settings.name || "") + ", welcome 👋";
     $("#page-title").textContent = t[0];
     $("#page-subtitle").textContent = t[1];
     const content = $("#page-content");
     content.innerHTML = ({
       overview: pageOverview, transactions: pageTransactions, accounts: pageAccounts,
-      budgets: pageBudgets, goals: pageGoals, debts: pageDebts, reports: pageReports, settings: pageSettings
+      budgets: pageBudgets, goals: pageGoals, debts: pageDebts, reports: pageReports,
+      tools: () => (window.IVA.tools ? IVA.tools.mount() : ""), settings: pageSettings
     }[page])();
     content.className = "page-" + page;
     IVA.charts.animate(content);
@@ -176,17 +194,33 @@
   }
 
   /* ============ 3. shared components ============ */
-  function pageHead(title, sub, actions = "") {
-    return '<div class="page-head"><div><h2>' + U.esc(title) + '</h2><p>' + U.esc(sub) + "</p></div><div class=\"page-actions\">" + actions + "</div></div>";
+  /* ماسک شماره کارت: ۶۰۳۷ •••• •••• ۱۲۳۴ (برای نمایش) */
+  function maskCard(num, full) {
+    const d = U.toEnDigits(String(num || "")).replace(/\D/g, "");
+    if (!d) return "";
+    const s = full ? d.replace(/(\d{4})(?=\d)/g, "$1 ") : d.length >= 8 ? d.slice(0, 4) + " •••• •••• " + d.slice(-4) : d;
+    return U.lang() === "fa" ? s.replace(/\d/g, x => U.faDigits[+x]) : s;
+  }
+  /* پسوند کوتاه برای انتخابگر حساب‌ها: ···۱۲۳۴ */
+  function cardSuffix(num) {
+    const d = U.toEnDigits(String(num || "")).replace(/\D/g, "");
+    if (d.length < 4) return "";
+    const t = "···" + d.slice(-4);
+    return U.lang() === "fa" ? t.replace(/\d/g, x => U.faDigits[+x]) : t;
+  }
+  function pageHead(_title, _sub, actions = "") {
+    /* فیکس: تیتر و زیرتیتر فقط در topbar (h1) رندر می‌شود؛ قبلأ اینجا هم تکرار می‌شد */
+    return '<div class="page-head"><div class="page-actions">' + actions + "</div></div>";
   }
   function emptyState(icon, text, hint, action = "") {
     return '<div class="empty">' + U.icon(icon, 44) + "<p>" + U.esc(text) + "</p><small>" + U.esc(hint || "") + "</small>" + action + "</div>";
   }
-  function momChip(cur, prev) {
+  function momChip(cur, prev, invert) {
     if (!(prev > 0)) return '<span class="chip neutral">' + U.t("ov.noChange") + "</span>";
     const p = (cur - prev) / prev * 100;
-    const cls = p >= 0 ? "up" : "down";
-    const ic = p >= 0 ? "trend" : "trendDown";
+    const good = invert ? p < 0 : p >= 0; /* فیکس: برای هزینه جهت خوب/بد برعکس است */
+    const cls = good ? "up" : "down";
+    const ic = good ? "trend" : "trendDown";
     return '<span class="chip ' + cls + '">' + U.icon(ic, 13) + U.pct(Math.abs(p)) + " <i>" + U.t("ov.mom") + "</i></span>";
   }
   function countUp(root) {
@@ -231,7 +265,7 @@
     const catTotal = cats.reduce((a, c) => a + c.value, 0) || 1;
     const donutParts = cats.map(c => ({ value: c.value, color: c.meta.color, label: U.t("cat." + c.cat), tip: U.money(c.value) }));
     if (D.sums(D.txOfMonth(D.curKey())).expense > catTotal) donutParts.push({ value: D.sums(D.txOfMonth(D.curKey())).expense - catTotal, color: "var(--line-3)", label: U.t("chart.other") });
-    const recent = [...Store.state.transactions].sort((a, b) => a.date === b.date ? (a.id > b.id ? 1 : -1) : (a.date < b.date ? 1 : -1)).slice(0, 5);
+    const recent = [...Store.state.transactions].sort((a, b) => b.date < a.date ? -1 : 1).slice(0, 5);
     const insights = D.insights();
     const buds = Store.state.budgets.map(b => ({ b, ratio: b.amount > 0 ? D.budgetSpent(b) / b.amount : 0 })).sort((x, y) => y.ratio - x.ratio).slice(0, 3);
     const goal = [...Store.state.goals].sort((a, b) => (b.saved / b.target) - (a.saved / a.target))[0];
@@ -244,7 +278,7 @@
 
       '<section class="kpis">' +
       kpi("in", U.t("ov.income"), cur.income, prev.income, spark("income"), "var(--brand-2)") +
-      kpi("out", U.t("ov.expense"), cur.expense, prev.expense, spark("expense"), "var(--danger)") +
+      kpi("out", U.t("ov.expense"), cur.expense, prev.expense, spark("expense"), "var(--danger)", true) +
       kpi("spark", U.t("ov.savings"), Math.max(cur.net, 0), Math.max(prev.net, 0), spark("net"), "var(--brand)") +
       "</section>" +
 
@@ -272,8 +306,8 @@
         "<div><b>" + U.esc(goal.name) + "</b><p>" + U.money(goal.saved, { unit: false }) + " / " + U.compact(goal.target) + "</p></div></div></article>" : "") +
       "</div></section>";
   }
-  function kpi(icon, label, cur, prev, spark, color) {
-    return '<article class="kpi"><div class="kpi-top"><span class="stat-label">' + U.icon(icon, 16) + U.esc(label) + "</span>" + momChip(cur, prev) + '</div><strong><span data-count="' + cur + '">0</span><small>' + U.esc(U.t("common." + App.settings.currency)) + '</small></strong><div class="kpi-spark">' + IVA.charts.sparkline(spark, { w: 120, h: 34, color }) + "</div></article>";
+  function kpi(icon, label, cur, prev, spark, color, invert) {
+    return '<article class="kpi"><div class="kpi-top"><span class="stat-label">' + U.icon(icon, 16) + U.esc(label) + "</span>" + momChip(cur, prev, invert) + '</div><strong><span data-count="' + cur + '">0</span><small>' + U.esc(U.t("common." + App.settings.currency)) + '</small></strong><div class="kpi-spark">' + IVA.charts.sparkline(spark, { w: 120, h: 34, color }) + "</div></article>";
   }
 
   function filteredTx() {
@@ -329,11 +363,15 @@
       '<section class="acc-grid">' + Store.state.accounts.map(a => {
         const meta = IVA.i18n.ACCOUNT_TYPE_MAP[a.type] || { color: "#6756e8", icon: "bank" };
         const nTx = D.txOfMonth(key).filter(t => t.accountId === a.id).length;
+        /* بند ۹: نام + لوگوی بانک شناسایی‌شده از BIN شماره کارت */
+        const bin = a.cardNumber && window.IVA.tools && window.IVA.tools.binLookup ? window.IVA.tools.binLookup(a.cardNumber) : null;
+        const bankBadge = bin ? '<span class="bank-badge" title="' + U.esc(bin.name) + '">' + (bin.logo ? '<img class="bin-logo" src="assets/banks/' + U.esc(bin.logo) + '.svg" alt="" width="14" height="14">' : "") + U.esc(bin.name) + "</span>" : "";
+        const cardNo = a.cardNumber ? '<span class="card-no" dir="ltr" title="' + U.esc(U.t("acc.cardNumber")) + '">' + U.icon("card", 13) + " " + U.esc(maskCard(a.cardNumber)) + "</span>" : "";
         return '<article class="card acc-card" style="--ac:' + U.esc(a.color) + '">' +
           '<div class="acc-head"><span class="acc-ic">' + U.icon(meta.icon, 20) + '</span><div><h3>' + U.esc(a.name) + "</h3><small>" + U.esc(U.t("acc." + a.type)) + "</small></div>" +
           '<span class="tx-ops"><button class="ibtn" data-action="edit" data-type="account" data-id="' + U.esc(a.id) + '" aria-label="' + U.esc(U.t("common.edit")) + '">' + U.icon("edit", 15) + '</button><button class="ibtn danger" data-action="del" data-type="account" data-id="' + U.esc(a.id) + '" aria-label="' + U.esc(U.t("common.delete")) + '">' + U.icon("trash", 15) + "</button></span></div>" +
-          '<strong class="acc-bal' + (a.balance < 0 ? " neg" : "") + '">' + U.money(a.balance, { unit: false }) + '<small>' + U.esc(U.t("common." + App.settings.currency)) + "</small></strong>" +
-          '<footer><span>' + U.icon("list", 13) + " " + U.group(nTx) + " " + U.esc(U.t("acc.txThisMonth")) + "</span>" + (a.note ? "<span>" + U.esc(a.note) + "</span>" : "") + "</footer></article>";
+          '<strong class="acc-bal' + (a.balance < 0 ? " neg" : "") + '">' + (a.balance < 0 ? "\u2212" : "") + U.money(a.balance, { unit: false }) + '<small>' + U.esc(U.t("common." + App.settings.currency)) + "</small></strong>" +
+          '<footer><span>' + U.icon("list", 13) + " " + U.group(nTx) + " " + U.esc(U.t("acc.txThisMonth")) + "</span>" + cardNo + (a.note ? "<span>" + U.esc(a.note) + "</span>" : "") + bankBadge + "</footer></article>";
       }).join("") + "</section>" +
       (Store.state.accounts.length ? "" : emptyState("bank", U.t("acc.none"), ""));
   }
@@ -386,7 +424,7 @@
       '<section class="debt-totals">' +
       '<div class="dtot neg"><span>' + U.icon("out", 15) + U.esc(U.t("debt.totalDebt")) + "</span><b>" + U.money(debt, { unit: false }) + "</b></div>" +
       '<div class="dtot pos"><span>' + U.icon("in", 15) + U.esc(U.t("debt.totalCredit")) + "</span><b>" + U.money(credit, { unit: false }) + "</b></div>" +
-      '<div class="dtot"><span>' + U.icon("swap", 15) + U.esc(U.t("debt.net")) + "</span><b>" + U.money(credit - debt, { unit: false }) + "</b></div></section>" +
+      '<div class="dtot"><span>' + U.icon("swap", 15) + U.esc(U.t("debt.net")) + "</span><b>" + (credit - debt < 0 ? "\u2212" : "") + U.money(credit - debt, { unit: false }) + "</b></div></section>" +
       (list.length ? '<section class="debt-grid">' + list.map(x => {
         const due = x.dueDate ? U.dueLabel(x.dueDate) : null;
         return '<article class="card debt-card ' + (x.kind === "debt" ? "is-debt" : "is-credit") + (x.settled ? " settled" : "") + '">' +
@@ -399,50 +437,102 @@
   }
 
   function pageReports() {
+    if (App.repAcc && App.repAcc !== "all" && !Store.state.accounts.some(a => a.id === App.repAcc)) App.repAcc = "all"; /* حساب حذف‌شده */
     const n = App.reportRange;
-    const s = D.series(n);
-    const cur = D.sums(D.txOfMonth(D.curKey()));
+    const sec = App.repSec || "cashflow";
+    const accF = App.repAcc || "all";
+    /* بند ۸: همه محاسبات با فیلتر حساب/کارت انتخابی */
+    const inAcc = t => accF === "all" || t.accountId === accF;
+    const txsOf = k => D.txOfMonth(k).filter(inAcc);
+    const keys = D.monthKeys(n);
+    const s = { keys, rows: keys.map(k => ({ key: k, label: U.monthLabel(k), ...D.sums(txsOf(k)) })) };
+    const cur = D.sums(txsOf(D.curKey()));
     const cumul = []; let run = 0; s.rows.forEach(r => { run += r.net; cumul.push(run); });
-    const cats = D.catBreakdownRange(s.keys);
+    const cats = D.catBreakdownRange(s.keys, inAcc);
     const catTotal = cats.reduce((a, c) => a + c.value, 0) || 1;
-    const daysPassed = Math.max(1, new Date().getDate());
-    const projection = cur.expense / daysPassed * 30;
-    const big = Store.state.transactions.filter(t => t.amount < 0 && s.keys.includes(U.monthKey(U.fromISO(t.date)))).sort((a, b) => a.amount - b.amount)[0];
-    return pageHead(U.t("rep.title"), U.t("rep.sub"),
-      '<div class="chips">' + [3, 6, 12].map(x => '<button class="chip-btn ' + (x === n ? "on" : "") + '" data-action="range" data-val="' + x + '">' + U.esc(U.t("rep.months", { n: U.group(x) })) + "</button>").join("") + "</div>") +
-      '<section class="rp-tiles"><article class="kpi"><div class="kpi-top"><span class="stat-label">' + U.icon("trend", 16) + U.esc(U.t("rep.savingsRate")) + '</span></div><strong>' + (cur.income > 0 ? U.pct((cur.income - cur.expense) / cur.income * 100) : "—") + '</strong><small>' + U.esc(U.t("common.thisMonth")) + "</small></article>" +
+    /* فیکس: روز جاری و طول ماه بر پایه تقویم شمسی */
+    const jNow = U._jParts(new Date());
+    const daysPassed = Math.max(1, jNow.day || 1);
+    const mLen = jNow.month <= 6 ? 31 : jNow.month <= 11 ? 30 : ([1, 5, 9, 13, 17, 22, 26, 30].indexOf(((jNow.year % 33) + 33) % 33) >= 0 ? 30 : 29);
+    const projection = cur.expense / daysPassed * mLen;
+    const big = Store.state.transactions.filter(t => t.amount < 0 && inAcc(t) && s.keys.includes(U.monthKey(U.fromISO(t.date)))).sort((a, b) => a.amount - b.amount)[0];
+    const accSel = '<select id="rep-acc" class="sel" aria-label="' + U.esc(U.t("rep.accFilter")) + '">' +
+      '<option value="all"' + (accF === "all" ? " selected" : "") + ">" + U.esc(U.t("rep.accAll")) + "</option>" +
+      Store.state.accounts.map(a => '<option value="' + U.esc(a.id) + '"' + (accF === a.id ? " selected" : "") + ">" + U.esc(a.name) + (a.cardNumber ? " · " + U.esc(a.cardNumber.slice(-4)) : "") + "</option>").join("") + "</select>";
+    const secChips = '<div class="chips" role="tablist">' +
+      [["cashflow", "rep.secCash"], ["breakdown", "rep.secBreak"], ["trend", "rep.secTrend"], ["budget", "rep.secBudget"]].map(x =>
+        '<button class="chip-btn ' + (sec === x[0] ? "on" : "") + '" role="tab" aria-selected="' + (sec === x[0]) + '" data-action="rep-sec" data-val="' + x[0] + '">' + U.esc(U.t(x[1])) + "</button>").join("") + "</div>";
+    const head = pageHead(U.t("rep.title"), U.t("rep.sub"),
+      '<div class="row-head">' + accSel + '</div><div class="chips">' + [3, 6, 12].map(x => '<button class="chip-btn ' + (x === n ? "on" : "") + '" data-action="range" data-val="' + x + '">' + U.esc(U.t("rep.months", { n: U.group(x) })) + "</button>").join("") + "</div>" + secChips);
+    const tiles = '<section class="rp-tiles"><article class="kpi"><div class="kpi-top"><span class="stat-label">' + U.icon("trend", 16) + U.esc(U.t("rep.savingsRate")) + '</span></div><strong>' + (cur.income > 0 ? U.pct((cur.income - cur.expense) / cur.income * 100) : "—") + '</strong><small>' + U.esc(U.t("common.thisMonth")) + "</small></article>" +
       '<article class="kpi"><div class="kpi-top"><span class="stat-label">' + U.icon("calendar", 16) + U.esc(U.t("rep.avgDaily")) + '</span></div><strong>' + U.compact(cur.expense / daysPassed) + '</strong><small>' + U.esc(U.t("common.thisMonth")) + "</small></article>" +
-      '<article class="kpi"><div class="kpi-top"><span class="stat-label">' + U.icon("out", 16) + U.esc(U.t("rep.projection")) + '</span></div><strong>' + U.compact(projection) + "</strong><small>" + U.esc(U.t("common.thisMonth")) + "</small></article></section>" +
-      '<section class="grid-2">' +
-      '<article class="card"><div class="card-head"><div><h2>' + U.esc(U.t("rep.cashflow")) + "</h2><p>" + U.esc(U.t("rep.cashflowSub")) + '</p></div><div class="legend-mini"><span><i style="background:var(--brand-2)"></i>' + U.esc(U.t("chart.income")) + '</span><span><i style="background:var(--danger)"></i>' + U.esc(U.t("chart.expense")) + "</span></div></div>" +
-      IVA.charts.bars({ labels: s.rows.map(r => r.label), income: s.rows.map(r => r.income), expense: s.rows.map(r => r.expense) }) + "</article>" +
-      '<article class="card"><div class="card-head"><div><h2>' + U.esc(U.t("rep.trend")) + "</h2><p>" + U.esc(U.t("rep.trendSub")) + "</p></div></div>" +
-      IVA.charts.line({ labels: s.rows.map(r => r.label), values: cumul, color: "var(--brand)" }) + "</article></section>" +
-      '<section class="grid-2">' +
-      '<article class="card"><div class="card-head"><div><h2>' + U.esc(U.t("rep.topCats")) + "</h2><p>" + U.esc(U.t("rep.topCatsSub")) + "</p></div></div>" +
-      (cats.length ? '<ul class="cat-list">' + cats.slice(0, 7).map(c => '<li><span class="cat-ic" style="--c:' + c.meta.color + '">' + U.icon(c.meta.icon, 15) + "</span><div class=\"cat-mid\"><b>" + U.esc(U.t("cat." + c.cat)) + '</b><div class="progress"><i style="width:' + (c.value / cats[0].value * 100).toFixed(0) + "%;background:" + c.meta.color + '"></i></div></div><div class="cat-end"><b>' + U.compact(c.value) + "</b><small>" + U.pct(c.value / catTotal * 100) + "</small></div></li>").join("") + "</ul>" : emptyState("pie", U.t("chart.noData"), "")) + "</article>" +
-      '<article class="card"><div class="card-head"><div><h2>' + U.esc(U.t("rep.budgetUsage")) + "</h2><p>" + U.esc(U.t("rep.budgetUsageSub")) + "</p></div></div>" +
-      (Store.state.budgets.length ? '<ul class="cat-list">' + Store.state.budgets.map(b => {
-        const spent = D.budgetSpent(b); const ratio = b.amount > 0 ? spent / b.amount : 0;
-        return '<li><span class="cat-ic" style="--c:' + U.esc(b.color) + '">' + U.icon((IVA.i18n.CATEGORY_MAP[b.category] || { icon: "dot" }).icon, 15) + '</span><div class="cat-mid"><b>' + U.esc(U.t("cat." + b.category)) + '</b><div class="progress"><i style="width:' + U.clamp(ratio * 100, 0, 100) + "%;background:" + (ratio > 1 ? "var(--danger)" : U.esc(b.color)) + '"></i></div></div><div class="cat-end"><b>' + U.pct(ratio * 100) + "</b><small>" + U.compact(spent) + "</small></div></li>";
-      }).join("") + "</ul>" : emptyState("gauge", U.t("bud.none"), "")) +
-      (big ? '<div class="biggest"><span>' + U.icon("out", 14) + U.esc(U.t("rep.biggest")) + "</span><b>" + U.esc(big.title) + " · " + U.money(Math.abs(big.amount)) + "</b></div>" : "") +
-      "</article></section>";
+      '<article class="kpi"><div class="kpi-top"><span class="stat-label">' + U.icon("out", 16) + U.esc(U.t("rep.projection")) + '</span></div><strong>' + U.compact(projection) + "</strong><small>" + U.esc(U.t("common.thisMonth")) + "</small></article></section>";
+    let body = "";
+    if (sec === "cashflow") {
+      body = '<section class="grid-2"><article class="card"><div class="card-head"><div><h2>' + U.esc(U.t("rep.cashflow")) + "</h2><p>" + U.esc(U.t("rep.cashflowSub")) + '</p></div><div class="legend-mini"><span><i style="background:var(--brand-2)"></i>' + U.esc(U.t("chart.income")) + '</span><span><i style="background:var(--danger)"></i>' + U.esc(U.t("chart.expense")) + "</span></div></div>" +
+        IVA.charts.bars({ labels: s.rows.map(r => r.label), income: s.rows.map(r => r.income), expense: s.rows.map(r => r.expense) }) + "</article></section>";
+    } else if (sec === "breakdown") {
+      body = '<section class="grid-2"><article class="card"><div class="card-head"><div><h2>' + U.esc(U.t("rep.topCats")) + "</h2><p>" + U.esc(U.t("rep.topCatsSub")) + "</p></div></div>" +
+        (cats.length ? '<ul class="cat-list">' + cats.slice(0, 7).map(c => '<li><span class="cat-ic" style="--c:' + c.meta.color + '">' + U.icon(c.meta.icon, 15) + "</span><div class=\"cat-mid\"><b>" + U.esc(U.t("cat." + c.cat)) + '</b><div class="progress"><i style="width:' + (c.value / cats[0].value * 100).toFixed(0) + "%;background:" + c.meta.color + '"></i></div></div><div class="cat-end"><b>' + U.compact(c.value) + "</b><small>" + U.pct(c.value / catTotal * 100) + "</small></div></li>").join("") + "</ul>" : emptyState("pie", U.t("chart.noData"), "")) + "</article></section>";
+    } else if (sec === "trend") {
+      body = '<section class="grid-2"><article class="card"><div class="card-head"><div><h2>' + U.esc(U.t("rep.trend")) + "</h2><p>" + U.esc(U.t("rep.trendSub")) + "</p></div></div>" +
+        IVA.charts.line({ labels: s.rows.map(r => r.label), values: cumul, color: "var(--brand)" }) + "</article></section>";
+    } else {
+      body = '<section class="grid-2"><article class="card"><div class="card-head"><div><h2>' + U.esc(U.t("rep.budgetUsage")) + "</h2><p>" + U.esc(U.t("rep.budgetUsageSub")) + "</p></div></div>" +
+        (Store.state.budgets.length ? '<ul class="cat-list">' + Store.state.budgets.map(b => {
+          const spent = D.txOfMonth(D.curKey()).filter(inAcc).filter(t => t.amount < 0 && t.category === b.category).reduce((a, t) => a + Math.abs(t.amount), 0);
+          const ratio = b.amount > 0 ? spent / b.amount : 0;
+          return '<li><span class="cat-ic" style="--c:' + U.esc(b.color) + '">' + U.icon((IVA.i18n.CATEGORY_MAP[b.category] || { icon: "dot" }).icon, 15) + '</span><div class="cat-mid"><b>' + U.esc(U.t("cat." + b.category)) + '</b><div class="progress"><i style="width:' + U.clamp(ratio * 100, 0, 100) + "%;background:" + (ratio > 1 ? "var(--danger)" : U.esc(b.color)) + '"></i></div></div><div class="cat-end"><b>' + U.pct(ratio * 100) + "</b><small>" + U.compact(spent) + "</small></div></li>";
+        }).join("") + "</ul>" : emptyState("gauge", U.t("bud.none"), "")) +
+        (big ? '<div class="biggest"><span>' + U.icon("out", 14) + U.esc(U.t("rep.biggest")) + "</span><b>" + U.esc(big.title) + " · " + U.money(Math.abs(big.amount)) + "</b></div>" : "") +
+        "</article></section>";
+    }
+    return head + tiles + body;
   }
-  D.catBreakdownRange = function (keys) {
+  D.catBreakdownRange = function (keys, inAcc) {
     const set = new Set(keys);
     const map = {};
     for (const t of Store.state.transactions) {
       if (t.amount > 0) continue;
       if (!set.has(U.monthKey(U.fromISO(t.date)))) continue;
+      if (inAcc && !inAcc(t)) continue;
       map[t.category] = (map[t.category] || 0) + Math.abs(t.amount);
     }
     return Object.entries(map).map(([k, v]) => ({ cat: k, value: v, meta: IVA.i18n.CATEGORY_MAP[k] || { color: "#8892a6", icon: "dot" } })).sort((a, b) => b.value - a.value);
   };
 
+  /* تشخیص خودکار سیستم/معماری برای بخش «بررسی بروزرسانی» */
+  function sysInfo() {
+    const fa = U.lang() === "fa";
+    const d = window.ivaDesktop || null;
+    let os = "", arch = (d && d.arch) || "";
+    if (d && d.platform) os = d.platform;
+    else {
+      const ua = navigator.userAgent || "";
+      if (/Android/i.test(ua)) os = "android";
+      else if (/Windows/i.test(ua)) { os = "win32"; if (!arch) arch = /arm/i.test(ua) ? "arm64" : "x64"; }
+      else if (/Macintosh|Mac OS/i.test(ua)) os = "darwin";
+      else if (/Linux|X11/i.test(ua)) { os = "linux"; if (!arch) arch = /arm|aarch/i.test(ua) ? "arm64" : "x64"; }
+    }
+    const osName = { win32: fa ? "ویندوز" : "Windows", darwin: fa ? "مک (macOS)" : "macOS", linux: fa ? "لینوکس" : "Linux", android: fa ? "اندروید" : "Android" }[os] || (fa ? "مرورگر (PWA)" : "Browser (PWA)");
+    const archName = { x64: fa ? "x64 (۶۴بیتی)" : "x64 (64-bit)", ia32: fa ? "x86 (۳۲بیتی)" : "x86 (32-bit)", arm64: "ARM64" }[arch] || "";
+    const key = os === "win32" || os === "linux" ? os + "|" + (arch || "x64") : os;
+    const file = {
+      "win32|x64": fa ? "Setup x64.exe (ویندوز ۶۴بیتی)" : "Setup x64.exe (Windows 64-bit)",
+      "win32|ia32": fa ? "Setup x86.exe (ویندوز ۳۲بیتی)" : "Setup x86.exe (Windows 32-bit)",
+      "win32|arm64": fa ? "Setup ARM64.exe (ویندوز روی ARM)" : "Setup ARM64.exe (Windows on ARM)",
+      darwin: fa ? "فایل dmg نسخهٔ مک" : "macOS dmg",
+      "linux|x64": fa ? "بستهٔ deb یا AppImage" : "deb or AppImage",
+      "linux|arm64": fa ? "بستهٔ ARM64 (deb/AppImage)" : "ARM64 (deb/AppImage)",
+      android: fa ? "فایل APK" : "APK file",
+      web: fa ? "نیازی به دانلود ندارد (PWA)" : "No download needed (PWA)"
+    }[key] || (fa ? "فایل مناسب سیستم‌تان از صفحهٔ Releases" : "Matching file from the Releases page");
+    return { label: osName + (archName ? " · " + archName : ""), file };
+  }
+
   function pageSettings() {
     const st = App.settings;
-    const sw = (id, on) => '<span class="sw ' + (on ? "on" : "") + '" aria-hidden="true"></span>';
+    const sys = sysInfo();
     return pageHead(U.t("set.title"), U.t("set.sub")) +
       '<section class="set-grid">' +
       '<article class="card"><h2 class="sec-title">' + U.icon("home", 16) + " " + U.esc(U.t("set.profile")) + '</h2>' +
@@ -462,9 +552,18 @@
       '<div class="setting-row"><div><b>' + U.esc(U.t("action.importJson")) + "</b><small>" + U.esc(U.t("set.importHint")) + '</small></div><button class="secondary" data-action="import-json">' + U.icon("upload", 14) + " " + U.esc(U.t("common.restore")) + '</button><input type="file" id="import-file" accept="application/json,.json" hidden></div>' +
       '<div class="setting-row"><div><b>' + U.esc(U.t("action.reset")) + "</b><small>" + U.esc(U.t("set.resetHint")) + '</small></div><button class="danger-btn" data-action="reset">' + U.esc(U.t("action.reset")) + "</button></div></article>" +
 
+      '<article class="card"><h2 class="sec-title">' + U.icon("refresh", 16) + " " + U.esc(U.t("set.upTitle")) + '</h2>' +
+      '<p class="set-up-desc">' + U.esc(U.t("set.upDesc")) + "</p>" +
+      '<div class="update-notes"><b>' + U.icon("info", 14) + " " + U.esc(U.t("set.upNotes")) + "</b><ul>" +
+      "<li>" + U.esc(U.t("set.upVer")) + ": <b>IVA v" + U.esc(window.IVA.VERSION || "2.0.0") + "</b></li>" +
+      "<li>" + U.esc(U.t("set.upSys")) + ": <b>" + U.esc(sys.label) + "</b></li>" +
+      "<li>" + U.esc(U.t("set.upFile")) + ": <b>" + U.esc(sys.file) + "</b></li>" +
+      "<li>" + U.esc(U.t("set.upTip")) + "</li></ul></div>" +
+      '<a class="up-btn" href="https://github.com/Kourosh242/iva-personal-finance/releases" target="_blank" rel="noopener noreferrer">' + U.icon("refresh", 15) + " " + U.esc(U.t("set.upBtn")) + " \u2197</a></article>" +
+
       '<article class="card"><h2 class="sec-title">' + U.icon("info", 16) + " " + U.esc(U.t("set.about")) + '</h2>' +
-      '<div class="setting-row"><div><b>IVA</b><small>' + U.esc(U.t("footer.slogan")) + '</small></div><span class="ver">v2.0.0</span></div>' +
-      '<div class="setting-row"><div><b>' + U.esc(U.t("set.offline")) + "</b></div><span class=\"due ok\">" + U.icon("check", 13) + U.esc(U.t("set.offlineOk")) + "</span></div>" +
+      '<div class="setting-row"><div><b>IVA</b><small>' + U.esc(U.t("footer.slogan")) + "</small></div><span class=\"ver\">v" + U.esc(window.IVA.VERSION || "2.0.0") + "</span></div>" +
+      '<div class="setting-row"><div><b>' + U.esc(U.t("set.onDevice")) + "</b></div><span class=\"due ok\">" + U.icon("check", 13) + U.esc(U.t("set.onDeviceOk")) + "</span></div>" +
       '<div class="setting-row"><div><b>' + U.esc(U.t("set.license")) + "</b></div><span>MIT</span></div>" +
       '<div class="setting-row"><div><b>' + U.esc(U.t("set.shortcuts")) + "</b><small>N: " + U.esc(U.t("set.scNew")) + " · /: " + U.esc(U.t("set.scSearch")) + " · T: " + U.esc(U.t("set.scTheme")) + " · Esc: " + U.esc(U.t("set.scClose")) + "</small></div></div>" +
       (App.deferredInstall ? '<div class="setting-row"><div><b>' + U.esc(U.t("action.install")) + "</b><small>" + U.esc(U.t("set.installHint")) + '</small></div><button class="primary" data-action="install">' + U.icon("smartphone", 15) + " " + U.esc(U.t("action.install")) + "</button></div>" : "") +
@@ -483,21 +582,24 @@
           '<div class="seg wide" data-role="tx-type"><button type="button" class="seg-btn ' + (type === "expense" ? "on" : "") + '" data-val="expense">' + U.icon("out", 15) + " " + U.esc(U.t("tx.expense")) + '</button><button type="button" class="seg-btn ' + (type === "income" ? "on" : "") + '" data-val="income">' + U.icon("in", 15) + " " + U.esc(U.t("tx.income")) + "</button></div>" +
           '<input type="hidden" name="type" value="' + type + '">' +
           field("title", U.t("common.title"), '<input name="title" required minlength="2" maxlength="80" autocomplete="off" placeholder="' + U.esc(U.t("seed.tx2")) + '" value="' + U.esc(data.title || "") + '">') +
-          field("amount", U.t("common.amount") + " (" + U.t("common.toman") + ")", '<input name="amount" class="amt-input" inputmode="numeric" required placeholder="0" value="' + (data.amount != null ? U.group(Math.abs(data.amount)) : "") + '">') +
+          field("amount", U.t("common.amount") + " (" + U.t("common.toman") + ")", '<input name="amount" class="amt-input" inputmode="numeric" required placeholder="' + U.esc(U.t("tx.amountPh")) + '" value="' + (data.amount != null ? U.group(Math.abs(data.amount)) : "") + '">') +
           field("category", U.t("common.category"), '<select name="category" id="f-cat">' + catList(type) + "</select>") +
-          field("account", U.t("common.account"), '<select name="accountId">' + (Store.state.accounts.length ? Store.state.accounts.map(a => '<option value="' + U.esc(a.id) + '" ' + (data.accountId === a.id ? "selected" : "") + ">" + U.esc(a.name) + "</option>").join("") : '<option value="">' + U.esc(U.t("acc.none")) + "</option>") + "</select>") +
+          field("account", U.t("common.account"), '<select name="accountId">' + (Store.state.accounts.length ? Store.state.accounts.map(a => '<option value="' + U.esc(a.id) + '" ' + (data.accountId === a.id ? "selected" : "") + ">" + U.esc(a.name + (a.cardNumber ? " (" + cardSuffix(a.cardNumber) + ")" : "")) + "</option>").join("") : '<option value="">' + U.esc(U.t("acc.none")) + "</option>") + "</select>") +
           field("date", U.t("common.date"), '<input type="date" name="date" value="' + U.esc(data.date || U.isoToday()) + '" max="' + U.isoToday() + '"><small class="date-hint"></small>') +
           field("note", U.t("common.note") + " <i>(" + U.t("common.optional") + ")</i>", '<input name="note" maxlength="140" placeholder="' + U.esc(U.t("tx.notePh")) + '" value="' + U.esc(data.note || "") + '">')
       };
     },
     account(data = {}) {
       const isEdit = !!data.id;
+      const isCard = data.type === "card";
       return {
         title: isEdit ? U.t("form.accountEdit") : U.t("form.account"),
         body:
-          field("title", U.t("common.name"), '<input name="title" required minlength="2" maxlength="60" placeholder="' + U.esc(U.t("seed.acc1")) + '" value="' + U.esc(data.name || "") + '">') +
+          field("title", U.t("common.name"), '<input name="title" required minlength="2" maxlength="60" placeholder="' + U.esc(U.t(isCard ? "acc.nameCardPh" : "acc.nameBankPh")) + '" value="' + U.esc(data.name || "") + '">') +
           field("type", U.t("common.kind"), '<select name="accType">' + IVA.i18n.ACCOUNT_TYPES.map(a => '<option value="' + a.key + '" ' + ((data.type || "bank") === a.key ? "selected" : "") + ">" + U.esc(U.t("acc." + a.key)) + "</option>").join("") + "</select>") +
-          field("amount", U.t("acc.openingBalance") + " (" + U.t("common.toman") + ")", '<input name="amount" class="amt-input" inputmode="numeric" placeholder="0" value="' + (data.balance != null ? U.group(data.balance) : "") + '">') +
+          '<label class="field card-field" style="display:' + (data.type === "cash" ? "none" : "") + '"><span>' + U.esc(U.t("acc.cardNumber")) + ' <i>(' + U.esc(U.t("common.required")) + ')</i></span><div class="field-in" data-field="cardNumber"><input name="cardNumber" class="card-input" dir="ltr" inputmode="numeric" autocomplete="off" maxlength="19" placeholder="' + U.esc(U.t("acc.cardNumberPh")) + '" value="' + U.esc(maskCard(data.cardNumber, true)) + '"></div></label>' +
+          '<button type="button" class="skip-card-btn" data-skip="card">' + U.esc(U.t("acc.skipCard")) + "</button>" +
+          field("amount", U.t("acc.openingBalance") + " (" + U.t("common.toman") + ")", '<input name="amount" class="amt-input" inputmode="numeric" placeholder="' + U.esc(U.t("acc.openBalPh")) + '" value="' + (data.balance != null ? U.group(data.balance) : "") + '">') +
           field("color", U.t("common.color"), swatches(data.color)) +
           field("note", U.t("common.note") + " <i>(" + U.t("common.optional") + ")</i>", '<input name="note" maxlength="40" value="' + U.esc(data.note || "") + '">')
       };
@@ -509,7 +611,7 @@
         body:
           field("title", U.t("common.name"), '<input name="title" required minlength="2" maxlength="60" placeholder="' + U.esc(U.t("seed.bud1")) + '" value="' + U.esc(data.name || "") + '">') +
           field("category", U.t("common.category"), '<select name="category">' + IVA.i18n.CATEGORIES.expense.map(c => '<option value="' + c.key + '" ' + ((data.category || "food") === c.key ? "selected" : "") + ">" + U.esc(U.t("cat." + c.key)) + "</option>").join("") + "</select>") +
-          field("amount", U.t("common.limit") + " (" + U.t("common.toman") + ")", '<input name="amount" class="amt-input" inputmode="numeric" required placeholder="0" value="' + (data.amount != null ? U.group(data.amount) : "") + '">') +
+          field("amount", U.t("common.limit") + " (" + U.t("common.toman") + ")", '<input name="amount" class="amt-input" inputmode="numeric" required placeholder="' + U.esc(U.t("bud.limitPh")) + '" value="' + (data.amount != null ? U.group(data.amount) : "") + '">') +
           field("color", U.t("common.color"), swatches(data.color))
       };
     },
@@ -519,8 +621,8 @@
         title: isEdit ? U.t("form.goalEdit") : U.t("form.goal"),
         body:
           field("title", U.t("common.name"), '<input name="title" required minlength="2" maxlength="60" placeholder="' + U.esc(U.t("seed.goal1")) + '" value="' + U.esc(data.name || "") + '">') +
-          field("target", U.t("common.target") + " (" + U.t("common.toman") + ")", '<input name="target" class="amt-input" inputmode="numeric" required placeholder="0" value="' + (data.target != null ? U.group(data.target) : "") + '">') +
-          field("saved", U.t("common.saved") + " (" + U.t("common.toman") + ")", '<input name="saved" class="amt-input" inputmode="numeric" placeholder="0" value="' + (data.saved != null ? U.group(data.saved) : "0") + '">') +
+          field("target", U.t("common.target") + " (" + U.t("common.toman") + ")", '<input name="target" class="amt-input" inputmode="numeric" required placeholder="' + U.esc(U.t("goal.targetPh")) + '" value="' + (data.target != null ? U.group(data.target) : "") + '">') +
+          field("saved", U.t("common.saved") + " (" + U.t("common.toman") + ")", '<input name="saved" class="amt-input" inputmode="numeric" placeholder="' + U.esc(U.t("goal.savedPh")) + '" value="' + (data.saved != null ? U.group(data.saved) : "") + '">') +
           field("deadline", U.t("common.deadline") + " <i>(" + U.t("common.optional") + ")</i>", '<input type="date" name="deadline" value="' + U.esc(data.deadline || "") + '">') +
           field("color", U.t("common.color"), swatches(data.color))
       };
@@ -534,7 +636,7 @@
           '<div class="seg wide" data-role="debt-kind"><button type="button" class="seg-btn ' + (kind === "debt" ? "on" : "") + '" data-val="debt">' + U.icon("out", 15) + " " + U.esc(U.t("debt.debt")) + '</button><button type="button" class="seg-btn ' + (kind === "credit" ? "on" : "") + '" data-val="credit">' + U.icon("in", 15) + " " + U.esc(U.t("debt.credit")) + "</button></div>" +
           '<input type="hidden" name="kind" value="' + kind + '">' +
           field("title", U.t("common.name"), '<input name="title" required minlength="2" maxlength="60" placeholder="' + U.esc(U.t("seed.debt1")) + '" value="' + U.esc(data.name || "") + '">') +
-          field("amount", U.t("common.amount") + " (" + U.t("common.toman") + ")", '<input name="amount" class="amt-input" inputmode="numeric" required placeholder="0" value="' + (data.amount != null ? U.group(data.amount) : "") + '">') +
+          field("amount", U.t("common.amount") + " (" + U.t("common.toman") + ")", '<input name="amount" class="amt-input" inputmode="numeric" required placeholder="' + U.esc(U.t("debt.amountPh")) + '" value="' + (data.amount != null ? U.group(data.amount) : "") + '">') +
           field("dueDate", U.t("common.deadline") + " <i>(" + U.t("common.optional") + ")</i>", '<input type="date" name="dueDate" value="' + U.esc(data.dueDate || "") + '">') +
           field("note", U.t("common.note") + " <i>(" + U.t("common.optional") + ")</i>", '<input name="note" maxlength="60" value="' + U.esc(data.note || "") + '">')
       };
@@ -567,13 +669,50 @@
     const modal = root.querySelector(".modal");
     const first = modal.querySelector("input:not([type=hidden]), select");
     if (first) setTimeout(() => first.focus(), 60);
+    /* فرم حساب: فیلد شماره کارت فقط برای نوع «کارت بانکی» + placeholder پویا */
+    const typeSel = modal.querySelector('select[name="accType"]');
+    if (typeSel) {
+      const cardLabel = modal.querySelector(".card-field");
+      const cardInput = modal.querySelector('input[name="cardNumber"]');
+      const skipBtn = modal.querySelector(".skip-card-btn");
+      const titleInput = modal.querySelector('input[name="title"]');
+      const syncAcc = () => {
+        const isCash = typeSel.value === "cash";
+        const skipped = modal.dataset.skipCard === "1";
+        if (cardLabel) cardLabel.style.display = (isCash || skipped) ? "none" : "";
+        if (skipBtn) skipBtn.style.display = isCash ? "none" : "";
+        if (titleInput && !(data && data.id)) titleInput.placeholder = U.t(typeSel.value === "card" ? "acc.nameCardPh" : "acc.nameBankPh");
+      };
+      /* دکمهٔ قرمز: «علاقه‌مند به وارد کردن شماره کارت نیستم» → ثبت بدون کارت */
+      if (skipBtn) skipBtn.addEventListener("click", () => {
+        const on = modal.dataset.skipCard === "1";
+        if (on) {
+          delete modal.dataset.skipCard;
+          skipBtn.textContent = U.t("acc.skipCard");
+          skipBtn.classList.remove("on");
+          if (cardInput) cardInput.value = "";
+        } else {
+          modal.dataset.skipCard = "1";
+          skipBtn.textContent = U.t("acc.skipCardBack");
+          skipBtn.classList.add("on");
+          if (cardInput) { cardInput.value = ""; }
+          const hb = modal.querySelector(".bin-hint"); if (hb) hb.remove();
+        }
+        syncAcc();
+        if (cardInput && !on) cardInput.focus();
+      });
+      typeSel.addEventListener("change", syncAcc);
+      syncAcc();
+    }
     // date hint
     const dateIn = modal.querySelector('input[type="date"]');
     const hint = modal.querySelector(".date-hint");
     const updHint = () => { if (hint && dateIn && dateIn.value) hint.textContent = U.dateLabel(dateIn.value); };
     if (dateIn) { dateIn.addEventListener("change", updHint); updHint(); }
+    if (window.IVA && IVA.jdate) IVA.jdate.enhance(modal); /* انتخابگر تاریخ شمسی */
   }
   function closeModal() {
+    if (window.IVA && IVA.jdate && IVA.jdate.close) IVA.jdate.close(); /* پاپ‌آپ تقویم یتیم نماند */
     const root = $("#modal-root");
     root.hidden = true; root.innerHTML = "";
     if (App.lastFocus && App.lastFocus.isConnected) App.lastFocus.focus();
@@ -591,7 +730,7 @@
       '<div class="form-err" role="alert" hidden></div>' +
       '<div class="modal-actions"><button type="button" class="secondary" data-close="1">' + U.esc(U.t("common.cancel")) + '</button><button type="submit" class="primary">' + U.icon("check", 15) + " " + U.esc(U.t("common.save")) + "</button></div></form></div>";
     root.hidden = false;
-    setTimeout(() => { const inp = root.querySelector('input:not([type="hidden"])'); if (inp) inp.focus(); }, 60);
+    setTimeout(() => { const f = root.querySelector("input:not([type=hidden])"); if (f) f.focus(); }, 60);
   }
 
   /* confirm dialog (promise) */
@@ -647,7 +786,7 @@
       if (!(amount > 0)) return fail(U.t("common.invalidAmount"));
       withUndo(U.t("goal.fundsAdded"), () => {
         const g = Store.state.goals.find(x => x.id === id);
-        g.saved = U.clamp(g.saved + amount, 0, g.target);
+        g.saved = Math.max(0, g.saved + amount); /* فیکس: مازاد بر هدف دور ریخته نمی‌شود */
       });
       closeModal(); return;
     }
@@ -682,15 +821,28 @@
     if (!(Math.abs(amount) >= 0) || isNaN(amount)) return fail(U.t("common.invalidAmount"));
 
     if (type === "account") {
+      /* شماره کارت: برای نوع «کارت بانکی» اجباری و باید ۱۶ رقم باشد */
+      const accType = String(fd.get("accType") || "bank");
+      const skipCard = form.dataset.skipCard === "1"; /* دکمهٔ قرمز: کاربر نخواست کارت بدهد */
+      let cardNumber = U.toEnDigits(String(fd.get("cardNumber") || "")).replace(/\D/g, "");
+      if (skipCard) {
+        cardNumber = "";
+      } else if (accType === "bank" || accType === "card" || accType === "savings" || accType === "wallet") {
+        /* ثبت حساب بانکی بدون شماره کارت ممکن نیست (مگر با دکمهٔ انصراف صریح) */
+        if (!cardNumber) return fail(U.t("acc.cardRequired"));
+        if (cardNumber.length !== 16) return fail(U.t("acc.cardInvalid"));
+      } else {
+        cardNumber = "";
+      }
       closeModal();
-      if (id) withUndo(U.t("acc.updated"), () => { Object.assign(Store.state.accounts.find(x => x.id === id), { name: title, type: fd.get("accType"), balance: amount, color, note: String(fd.get("note") || "") }); });
-      else withUndo(U.t("acc.saved"), () => { Store.state.accounts.push({ id: U.uid(), name: title, type: fd.get("accType"), balance: amount, color, note: String(fd.get("note") || "") }); });
+      if (id) withUndo(U.t("acc.updated"), () => { Object.assign(Store.state.accounts.find(x => x.id === id), { name: title, type: accType, balance: amount, color, note: String(fd.get("note") || ""), cardNumber }); });
+      else withUndo(U.t("acc.saved"), () => { Store.state.accounts.push({ id: U.uid(), name: title, type: accType, balance: amount, color, note: String(fd.get("note") || ""), cardNumber }); });
       return;
     }
     if (type === "goal") {
       const target = U.parseAmount(fd.get("target"));
       if (!(target > 0)) return fail(U.t("common.invalidAmount"));
-      const saved = U.clamp(U.parseAmount(fd.get("saved")) || 0, 0, target);
+      const saved = Math.max(0, U.parseAmount(fd.get("saved")) || 0); /* فیکس: سرریز مجاز */
       closeModal();
       if (id) withUndo(U.t("goal.updated"), () => { Object.assign(Store.state.goals.find(x => x.id === id), { name: title, target, saved, deadline: fd.get("deadline") || "", color }); });
       else withUndo(U.t("goal.saved"), () => { Store.state.goals.push({ id: U.uid(), name: title, target, saved, deadline: fd.get("deadline") || "", color }); });
@@ -700,7 +852,8 @@
     if (type === "budget") {
       closeModal();
       const cat = fd.get("category");
-      if (id) withUndo(U.t("bud.updated"), () => { Object.assign(Store.state.budgets.find(x => x.id === id), { name: title, category: cat, amount, color }); });
+      /* فیکس: ویرایش هم مثل ساخت؛ دو بودجه با یک دسته = شمارش دوبارهٔ خرج در نمرهٔ سلامت */
+      if (id) withUndo(U.t("bud.updated"), () => { Object.assign(Store.state.budgets.find(x => x.id === id), { name: title, category: cat, amount, color }); Store.state.budgets = Store.state.budgets.filter(b => b.id === id || b.category !== cat); });
       else withUndo(U.t("bud.saved"), () => { if (Store.state.budgets.some(b => b.category === cat)) Store.state.budgets = Store.state.budgets.filter(b => b.category !== cat); Store.state.budgets.push({ id: U.uid(), name: title, category: cat, amount, color }); });
       return;
     }
@@ -815,9 +968,11 @@
     const h = D.health();
     const el = $("#health-widget");
     if (!el) return;
+    const ringColor = h.neutral ? "var(--line-2)" : h.score >= 80 ? "var(--brand-2)" : h.score >= 60 ? "var(--brand)" : h.score >= 40 ? "#f1b83f" : "var(--danger)";
+    const desc = h.neutral ? U.t("health.noDataDesc") : U.t("health.desc", { sr: U.group(h.savingsRate) });
     el.innerHTML = '<div class="health-top"><b>' + U.icon("gauge", 15) + " " + U.esc(U.t("health.title")) + '</b><em>' + U.esc(U.t(h.label)) + "</em></div>" +
-      IVA.charts.ring(h.score, { size: 92, thickness: 9, color: h.score >= 80 ? "var(--brand-2)" : h.score >= 60 ? "var(--brand)" : h.score >= 40 ? "#f1b83f" : "var(--danger)", label: U.group(h.score) }) +
-      "<p>" + U.esc(U.t("health.desc", { sr: U.group(h.savingsRate) })) + "</p>";
+      IVA.charts.ring(h.score, { size: 92, thickness: 9, color: ringColor, label: h.neutral ? "—" : U.group(h.score) }) +
+      "<p>" + U.esc(desc) + "</p>";
     IVA.charts.animate(el);
     // profile
     $("#profile-name").textContent = App.settings.name || "IVA";
@@ -875,6 +1030,7 @@
         else if (a === "tx-filter") { stop(); App.txFilters.type = el.dataset.val; App.txLimit = 30; render(); }
         else if (a === "tx-more") { stop(); App.txLimit += 30; render(); const inp = $("#tx-q"); if (inp) { const v = inp.value; inp.focus(); inp.value = v; } }
         else if (a === "range") { stop(); App.reportRange = +el.dataset.val; render(); }
+        else if (a === "rep-sec") { stop(); App.repSec = el.dataset.val; render(); }
         else if (a === "export-csv") { stop(); exportCSV(); }
         else if (a === "export-json") { stop(); exportJSON(); }
         else if (a === "import-json") { stop(); $("#import-file").click(); }
@@ -929,13 +1085,15 @@
 
     // form submits
     document.addEventListener("submit", e => {
-      if (e.target.id === "item-root-form" || e.target.closest("#modal-root")) { submitForm(e); return; }
+      if (e.target.id === "item-root-form" || (e.target.closest && e.target.closest("#modal-root"))) { submitForm(e); return; }
       if (e.target.id === "welcome-form") {
         e.preventDefault();
         const name = $("#welcome-name").value.trim();
         if (name.length < 2) return;
         App.settings.name = name; Store.saveSettings();
         $("#welcome-backdrop").hidden = true;
+        /* فیکس ریشه‌ای میان‌برها: فوکوس روی اینپوت مخفی welcome نماند (وگرنه typing=true و n/t مرده‌اند) */
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
         render();
         toast(U.t("toast.welcome", { n: name }));
       }
@@ -949,8 +1107,42 @@
         const q = $("#tx-q");
         if (q) { q.focus(); try { q.setSelectionRange(q.value.length, q.value.length); } catch (err) { } }
       }
+      /* شماره کارت: گروه ۴رقمی با فاصله */
+      if (e.target.classList && e.target.classList.contains("card-input")) {
+        const el = e.target;
+        const selStart = el.selectionStart != null ? el.selectionStart : el.value.length;
+        const prevRaw = el._ivaPrev || "";
+        const raw = U.toEnDigits(el.value).replace(/\D/g, "").slice(0, 16);
+        el.value = raw.replace(/(\d{4})(?=\d)/g, "$1 ");
+        if (U.lang() === "fa") el.value = el.value.replace(/\d/g, x => U.faDigits[+x]);
+        /* تایپ پیوسته در انتها (raw جدید ادامه‌ی قبلی است) → کرسر آخر؛
+           در RTL گزارش selection گاهی بج می‌زند — این قاعده مستقل از آن است */
+        if (prevRaw && raw.length > prevRaw.length && raw.slice(0, prevRaw.length) === prevRaw && selStart >= el._ivaPrevLen) {
+          try { el.setSelectionRange(el.value.length, el.value.length); } catch (err) { }
+        } else if (raw.length < prevRaw.length || !raw.startsWith(prevRaw.slice(0, raw.length))) {
+          /* ویرایش/حذف وسط متن: بازگرداندن کرسر با شمردن رقم‌های قبل از caret */
+          const digitsBefore = U.toEnDigits(el.value.slice(0, selStart)).replace(/\D/g, "").length;
+          let seen = 0, pos = 0;
+          while (pos < el.value.length && seen < digitsBefore) {
+            if (/[0-9\u06F0-\u06F9]/.test(el.value[pos])) seen++;
+            pos++;
+          }
+          try { el.setSelectionRange(pos, pos); } catch (err) { }
+        } else {
+          try { el.setSelectionRange(el.value.length, el.value.length); } catch (err) { }
+        }
+        el._ivaPrev = raw;
+        el._ivaPrevLen = el.value.length;
+        /* ابزارها: نمایش زنده بانک از ۶ رقم اول (مثل درگاه‌های پرداخت) */
+        try { if (window.IVA.tools && IVA.tools.cardHint && !el.dataset.bin) IVA.tools.cardHint(el); } catch (err) { }
+      }
       if (e.target.classList.contains("amt-input")) {
         const el = e.target;
+        /* نرخ/کارمزد وام: اعشار مجاز و بدون گروه‌بندی — ابزارها خودش هندل می‌کند */
+        if (el.dataset.loan === "rate" || el.dataset.loan === "fee") return;
+        /* فیکس: فیلدهای اعشاری تبدیل‌گر (مبلغ ۰٫۵ بیت‌کوین، نرخ دستی ۲۰۵٫۵) —
+           هندلر سراسری فقط صحیح گروه‌بندی می‌کند؛ نقطه را می‌بلعید و نرخ خراب می‌شد */
+        if (el.name === "conv-amount" || el.name === "conv-mf" || el.name === "conv-mt") return;
         const selStart = el.selectionStart != null ? el.selectionStart : el.value.length;
         const digitsBeforeCaret = U.toEnDigits(el.value.slice(0, selStart)).replace(/[^\d]/g, "").length;
         const raw = U.toEnDigits(el.value).replace(/[^\d]/g, "");
@@ -967,6 +1159,7 @@
     document.addEventListener("change", e => {
       const map = { "tx-cat": "cat", "tx-acc": "acc", "tx-month": "month", "tx-sort": "sort" };
       if (map[e.target.id]) { App.txFilters[map[e.target.id]] = e.target.value; App.txLimit = 30; render(); const s = $("#" + e.target.id); if (s) s.focus(); }
+      if (e.target.id === "rep-acc") { App.repAcc = e.target.value; render(); }
       if (e.target.id === "import-file" && e.target.files[0]) { importJSON(e.target.files[0]); e.target.value = ""; }
     });
 
@@ -975,18 +1168,28 @@
 
     // keyboard
     document.addEventListener("keydown", e => {
-      const typing = /input|textarea|select/i.test(document.activeElement.tagName);
+      const ae = document.activeElement;
+      const typing = !!ae && /input|textarea|select/i.test(ae.tagName);
       if (e.key === "Escape") {
         if (!$("#confirm-root").hidden) { const cancel = $('#confirm-root [data-r="0"]'); if (cancel) cancel.click(); return; }
         if (!$("#modal-root").hidden) { closeModal(); return; }
         if (!$("#sheet-backdrop").hidden) { closeSheet(); return; }
-        if (!$("#welcome-backdrop").hidden && App.settings.name) $("#welcome-backdrop").hidden = true;
+        if (!$("#welcome-backdrop").hidden && App.settings.name) { $("#welcome-backdrop").hidden = true; if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }
+        /* بند ۱۰: طبق متن تنظیمات، Esc پنجره را می‌بندد (فقط Electron؛ وقتی هیچ دیالوگی باز نبود) */
+        /* فقط وقتی هیچ خوش‌آمدی باز نیست؛ در اجرای اول Esc نباید کل پنجره را ببندد */
+        else if ($("#welcome-backdrop").hidden && window.ivaDesktop && window.ivaDesktop.escQuit) window.ivaDesktop.escQuit();
         return;
       }
       if (typing) return;
-      if (e.key === "n" || e.key === "N" || e.key === "ن") { e.preventDefault(); openForm("transaction"); }
-      else if (e.key === "/") { e.preventDefault(); go("transactions"); setTimeout(() => { const q = $("#tx-q"); if (q) q.focus(); }, 80); }
-      else if (e.key === "t" || e.key === "T") { App.settings.theme = document.documentElement.classList.contains("dark") ? "light" : "dark"; Store.saveSettings(); applyTheme(); render(); }
+      /* فیکس: میان‌برها وقتی مودال/دیالوگ تأیید باز است کاری نکنند (Esc/Tab جدا مدیریت می‌شوند) */
+      const dialogOpen = !$("#modal-root").hidden || !$("#confirm-root").hidden;
+      if (!dialogOpen) {
+        /* e.code = کلید فیزیکی؛ مستقل از چیدمان فارسی/انگلیسی — باگ «n و t کار نمی‌کنند» روی کیبورد فارسی */
+        const kk = e.key || "";
+        if (e.code === "KeyN" || kk === "n" || kk === "N" || kk === "ن") { e.preventDefault(); openForm("transaction"); }
+        else if (kk === "/") { e.preventDefault(); go("transactions"); setTimeout(() => { const q = $("#tx-q"); if (q) q.focus(); }, 80); }
+        else if (e.code === "KeyT" || kk === "t" || kk === "T" || kk === "ت") { e.preventDefault(); App.settings.theme = document.documentElement.classList.contains("dark") ? "light" : "dark"; Store.saveSettings(); applyTheme(); render(); }
+      }
       // focus trap in modal / confirm dialog
       if (e.key === "Tab") {
         const activeRoot = !$("#confirm-root").hidden ? "#confirm-root" : !$("#modal-root").hidden ? "#modal-root" : null;
@@ -1006,6 +1209,19 @@
     addEventListener("beforeinstallprompt", e => { e.preventDefault(); App.deferredInstall = e; if (App.page === "settings") render(); });
 
     bindTooltip();
+
+    /* اندروید Back: اول دیالوگ‌های درون‌برنامه‌ای بسته شوند (مودال/تأیید/شیت/خوش‌آمد)، بعد تاریخچه */
+    window.__ivaBack = function () {
+      const wb = $("#welcome-backdrop");
+      if (wb && !wb.hidden) { if (App.settings.name) { wb.hidden = true; } return true; }
+      const cf = $("#confirm-root");
+      if (cf && !cf.hidden) { cf.hidden = true; cf.innerHTML = ""; return true; }
+      const md = $("#modal-root");
+      if (md && !md.hidden) { closeModal(); return true; }
+      const sheet = $("#more-sheet");
+      if (sheet && sheet.classList.contains("open")) { closeSheet(); return true; }
+      return false;
+    };
   }
 
   /* ============ 12. welcome ============ */
@@ -1029,7 +1245,7 @@
     render();
     // warn about storage failures (private mode etc.)
     try { localStorage.setItem("iva-test", "1"); localStorage.removeItem("iva-test"); }
-    catch (e) { toast("LocalStorage is unavailable — data will not persist!", { type: "error" }); }
+    catch (e) { toast(U.t("toast.storageFail"), { type: "error" }); }
   }
 
   document.addEventListener("DOMContentLoaded", boot);

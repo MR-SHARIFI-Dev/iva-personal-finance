@@ -51,6 +51,9 @@ const Charts = {
   /* smooth line chart (cumulative) with area + dots */
   line({ labels, values, h = 210, color = "var(--brand)" }, opts = {}) {
     const W = 640, padT = 16, padB = 30, padS = 10;
+    /* defensive: ورودی خالی نباید کرش کند (یافته تست واحد) */
+    if (!Array.isArray(values) || !values.length) values = [0];
+    if (!Array.isArray(labels) || !labels.length) labels = [""];
     const n = Math.max(values.length, 1);
     const inner = h - padT - padB;
     const min = Math.min(0, ...values), max = Math.max(1, ...values);
